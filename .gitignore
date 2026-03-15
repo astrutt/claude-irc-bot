@@ -1,0 +1,19 @@
+# Never commit live configs — they contain API keys and passwords
+config.ini
+*.ini
+!config.example.ini
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
