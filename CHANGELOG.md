@@ -19,10 +19,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - Change takes effect immediately and is saved to config.ini
 - `_save_config_value(section, key, value)` — generic config persistence helper
   used by both `!bot model` and `!bot addadmin/deladmin`
+- Dynamic system prompt — model name is injected into the system prompt on every
+  API call so the bot correctly answers "what model are you running?" after a
+  live `!bot model` change, with no restart required
 
 ### Changed
 
 - `_save_admins()` refactored to use `_save_config_value()` — no functional change
+- System prompt stored as `_system_prompt_template` with `{model}` placeholder,
+  resolved to current `self.model` on every `_reply()` call
 
 ### Fixed
 

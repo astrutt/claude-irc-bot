@@ -370,9 +370,10 @@ class ClaudeIRCBot:
         if self.network_desc:
             net_context += f" ({self.network_desc})"
 
-        self.system_prompt = config["anthropic"].get("system_prompt", "") or (
+        self._system_prompt_template = config["anthropic"].get("system_prompt", "") or (
             f"You are {self.desired_nick}, a helpful AI assistant on an IRC network "
             f"{net_context}. "
+            "You are running as {{model}}. "
             "IMPORTANT RULES you must always follow:\n"
             "1. Keep ALL responses under 6 short lines. IRC has line-length limits.\n"
             "2. Never use markdown, bullet points, or code blocks.\n"
@@ -1810,11 +1811,15 @@ class ClaudeIRCBot:
         safe_input = f"<user nick={sender!r}> {user_text} </user>"
         history.append({"role": "user", "content": safe_input})
 
+        # Build system prompt fresh each call so {model} always reflects
+        # the current model (which can be changed live with !bot model)
+        system_prompt = self._system_prompt_template.replace("{model}", self.model)
+
         try:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
-                system=self.system_prompt,
+                system=system_prompt,
                 messages=list(history),
             )
             reply_text = response.content[0].text.strip()
