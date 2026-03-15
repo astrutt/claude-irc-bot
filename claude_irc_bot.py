@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                         Claude IRC Bot  v3.0                                ║
+║                         Claude IRC Bot  v3.1                                ║
 ║                                                                              ║
 ║  An IRC bot powered by Anthropic's Claude AI.                               ║
 ║                                                                              ║
 ║  Written by Claude (claude-sonnet-4-20250514, Anthropic)                    ║
-║  Commissioned by the 2600net IRC Network — irc.scuttled.net                 ║
+║  & Andrew Strutt (r0d3nt) — Commissioned by 2600net IRC Network             ║
 ║  https://github.com/2600net/claude-irc-bot                                  ║
 ║                                                                              ║
 ║  Features:                                                                   ║
@@ -52,9 +52,9 @@ except ImportError:
     _FERNET_AVAILABLE = False
 
 # ── Bot identity ──────────────────────────────────────────────────────────────
-BOT_VERSION = "Claude IRC Bot v3.0 | Written by Claude (Anthropic) | github.com/2600net/claude-irc-bot"
-BOT_SOURCE  = "https://github.com/2600net/claude-irc-bot"
-BOT_AUTHOR  = "Claude (claude-sonnet-4-20250514) for 2600net"
+BOT_VERSION = "Claude IRC Bot v3.1 | Claude (Anthropic) & Andrew Strutt (r0d3nt) | github.com/astrutt/claude-irc-bot"
+BOT_SOURCE  = "https://github.com/astrutt/claude-irc-bot"
+BOT_AUTHOR  = "Claude (Anthropic) & Andrew Strutt (r0d3nt) for 2600net"
 
 _KEY_FILE = "/etc/claude-irc-bot/secret.key"
 
@@ -1726,6 +1726,32 @@ class ClaudeIRCBot:
             self._send_msg(reply_to, f"{nick} removed from admin list (saved to config).")
             log.info(f"Admin {sender} removed {nick} from admin list.")
 
+        elif cmd == "model":
+            # !bot model                    — show current model
+            # !bot model <model_name>        — switch to a different model
+            # !bot model list               — show available Anthropic models
+            KNOWN_MODELS = {
+                "haiku":   "claude-haiku-4-5-20251001",
+                "sonnet":  "claude-sonnet-4-6",
+                "opus":    "claude-opus-4-6",
+            }
+            if not args or args[0].lower() == "current":
+                self._send_msg(reply_to, f"Current model: {self.model}")
+                return
+            if args[0].lower() == "list":
+                self._send_msg(reply_to,
+                    "Available shortcuts: haiku, sonnet, opus — or pass a full model string.")
+                self._send_msg(reply_to,
+                    "haiku=claude-haiku-4-5-20251001  sonnet=claude-sonnet-4-6  opus=claude-opus-4-6")
+                return
+            # Accept shortcut or full model string
+            new_model = KNOWN_MODELS.get(args[0].lower(), args[0].strip())
+            old_model = self.model
+            self.model = new_model
+            self._save_config_value("anthropic", "model", new_model)
+            log.info(f"Admin {sender} changed model: {old_model} → {new_model}")
+            self._send_msg(reply_to, f"Model changed: {old_model} → {new_model} (saved to config).")
+
         elif cmd == "adminlist":
             if not self.admins:
                 self._send_msg(reply_to, "Admin list is empty.")
@@ -1743,6 +1769,7 @@ class ClaudeIRCBot:
                 "!bot ignore/unignore <mask> | ignorelist",
                 "!bot addadmin/deladmin <nick> | adminlist",
                 "!bot ratelimit reset <nick>",
+                "!bot model [current|list|<name>]",
             ]
             for line in lines:
                 self._send_msg(reply_to, line)
@@ -1752,23 +1779,25 @@ class ClaudeIRCBot:
             self._send_msg(reply_to, f"Unknown command '{cmd}'. Try !bot help")
 
     def _save_admins(self):
+        """Write the current admin list back to config.ini."""
+        self._save_config_value("bot", "admins", ", ".join(sorted(self.admins)))
+
+    def _save_config_value(self, section: str, key: str, value: str):
         """
-        Write the current admin list back to config.ini so it survives restarts.
-        Uses configparser to update only the [bot] admins line, leaving everything
-        else in the file untouched.
+        Write a single key/value to config.ini without touching anything else.
+        Creates the section if it doesn't exist.
         """
         try:
-            # Re-read the file fresh to avoid clobbering any manual edits
             cfg = configparser.ConfigParser()
             cfg.read(self.config_path)
-            if "bot" not in cfg:
-                cfg["bot"] = {}
-            cfg["bot"]["admins"] = ", ".join(sorted(self.admins))
+            if section not in cfg:
+                cfg[section] = {}
+            cfg[section][key] = value
             with open(self.config_path, "w") as f:
                 cfg.write(f)
-            log.info(f"Admin list saved to {self.config_path}: {sorted(self.admins)}")
+            log.info(f"Config saved: [{section}] {key} = {value}")
         except Exception as e:
-            log.error(f"Failed to save admin list to config: {e}")
+            log.error(f"Failed to save config [{section}] {key}: {e}")
 
     # =========================================================================
     # Claude API call
