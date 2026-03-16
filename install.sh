@@ -52,9 +52,9 @@ read -r IRC_CHANNELS; IRC_CHANNELS="${IRC_CHANNELS:-#ClaudeBot}"
 # The bot will join AND register/manage all of these channels with ChanServ.
 # No separate ChanServ channel list needed.
 
-ask "Channel topic [Anthropic AI - IRC Connector by 2600net]:"
+ask "Channel topic [Anthropic AI - IRC Bot by 2600net]:"
 read -r CS_TOPIC
-CS_TOPIC="${CS_TOPIC:-Anthropic AI - IRC Connector by 2600net}"
+CS_TOPIC="${CS_TOPIC:-Anthropic AI - IRC Bot by 2600net}"
 
 ask "Command trigger prefix [!claude]:"
 read -r TRIGGER; TRIGGER="${TRIGGER:-!claude}"
@@ -164,7 +164,8 @@ success "Created log file: /var/log/claude-irc-bot.log"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Encrypt the NickServ password with Fernet (symmetric AES-128-CBC + HMAC)
-# Key lives at /etc/claude-irc-bot/secret.key  (chmod 600, root only)
+# Key lives at /etc/claude-irc-bot/secret.key
+# Permissions: root:$SYS_USER 640 — bot user can read, others cannot.
 # Config stores:  password = enc:<fernet_token>
 # Bot decrypts at startup; plain text passwords also accepted for manual edits.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -182,12 +183,14 @@ key = Fernet.generate_key()
 with open("$KEY_FILE", "wb") as f:
     f.write(key)
 PYEOF
-        chmod 600 "$KEY_FILE"
-        chown root:root "$KEY_FILE"
         success "Generated encryption key: $KEY_FILE"
     else
         warn "Encryption key already exists at $KEY_FILE — reusing it."
     fi
+
+    # Key readable by root and the bot's service user — nothing else
+    chown "root:${SYS_USER}" "$KEY_FILE"
+    chmod 640 "$KEY_FILE"
 
     # Encrypt the password
     NS_PASS_STORED=$("${VENV}/bin/python3" - <<PYEOF
@@ -329,6 +332,8 @@ Description=Claude IRC Bot (${NET_NAME})
 Documentation=https://github.com/2600net/claude-irc-bot
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -338,8 +343,6 @@ ExecStart=/opt/claude-irc-bot/venv/bin/python3 /opt/claude-irc-bot/claude_irc_bo
 WorkingDirectory=/opt/claude-irc-bot
 Restart=on-failure
 RestartSec=15s
-StartLimitIntervalSec=300
-StartLimitBurst=5
 TimeoutStopSec=15
 StandardOutput=journal
 StandardError=journal
@@ -371,7 +374,7 @@ echo -e "  Channels:   ${CYAN}${IRC_CHANNELS}${RESET}"
 echo -e "  Co-founder: ${CYAN}${ADMIN_NICK}${RESET}"
 echo -e "  Config:     ${CYAN}${CONFIG_PATH}${RESET}"
 [[ -n "$NS_PASS" ]] && \
-echo -e "  NS key:     ${CYAN}${KEY_FILE}${RESET} (chmod 600)"
+echo -e "  NS key:     ${CYAN}${KEY_FILE}${RESET} (root:${SYS_USER} 640)"
 echo -e "  Log:        ${CYAN}/var/log/claude-irc-bot.log${RESET}"
 echo ""
 echo -e "  ${BOLD}Test run (foreground):${RESET}"

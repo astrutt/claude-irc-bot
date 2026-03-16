@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                         Claude IRC Bot  v3.1                                ║
+║                         Claude IRC Bot  v3.6                                ║
 ║                                                                              ║
 ║  An IRC bot powered by Anthropic's Claude AI.                               ║
 ║                                                                              ║
@@ -52,38 +52,9 @@ except ImportError:
     _FERNET_AVAILABLE = False
 
 # ── Bot identity ──────────────────────────────────────────────────────────────
-BOT_VERSION = "Claude IRC Bot v3.1 | Claude (Anthropic) & Andrew Strutt (r0d3nt) | github.com/astrutt/claude-irc-bot"
+BOT_VERSION = "Claude IRC Bot v3.6 | Claude (Anthropic) & Andrew Strutt (r0d3nt) | github.com/astrutt/claude-irc-bot"
 BOT_SOURCE  = "https://github.com/astrutt/claude-irc-bot"
 BOT_AUTHOR  = "Claude (Anthropic) & Andrew Strutt (r0d3nt) for 2600net"
-
-_KEY_FILE = "/etc/claude-irc-bot/secret.key"
-
-def _decrypt_password(value: str) -> str:
-    """
-    Decrypt a Fernet-encrypted password from config.ini.
-    Encrypted values are stored as:  enc:<fernet_token>
-    Plain-text values pass through unchanged (backwards compatibility).
-    """
-    if not value.startswith("enc:"):
-        return value          # plain text — nothing to do
-    if not _FERNET_AVAILABLE:
-        log.error(
-            "Config has an encrypted password (enc:...) but the "
-            "'cryptography' package is not installed in the venv. "
-            "Run: /opt/claude-irc-bot/venv/bin/pip install cryptography"
-        )
-        return ""
-    token = value[4:]         # strip the "enc:" prefix
-    try:
-        with open(_KEY_FILE, "rb") as f:
-            key = f.read()
-        return _Fernet(key).decrypt(token.encode()).decode()
-    except FileNotFoundError:
-        log.error(f"Encryption key file not found: {_KEY_FILE}")
-        return ""
-    except Exception as e:
-        log.error(f"Failed to decrypt password: {e}")
-        return ""
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -98,54 +69,77 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-KEYFILE_PATH = "/etc/claude-irc-bot/.keyfile"
-ENC_PREFIX   = "ENC:"
+# ── Encryption helpers ────────────────────────────────────────────────────────
+# Single authoritative key file path — written by install.sh.
+_KEY_FILE = "/etc/claude-irc-bot/secret.key"
 
 
 def _get_fernet():
-    """Load the Fernet key from the keyfile. Returns None if not available."""
-    try:
-        from cryptography.fernet import Fernet
-        with open(KEYFILE_PATH, "rb") as f:
-            key = f.read().strip()
-        return Fernet(key)
-    except ImportError:
+    """
+    Load the Fernet key from _KEY_FILE.
+    Returns a Fernet instance, or None if the key file does not exist
+    (plain-text config is valid — nothing to decrypt).
+    """
+    if not _FERNET_AVAILABLE:
         return None
+    try:
+        with open(_KEY_FILE, "rb") as f:
+            return _Fernet(f.read().strip())
     except FileNotFoundError:
         return None
     except Exception as e:
-        log.warning(f"Could not load keyfile: {e}")
+        log.warning(f"Could not load encryption key {_KEY_FILE}: {e}")
         return None
 
 
 def _decrypt_value(value: str, fernet) -> str:
-    """Decrypt an ENC:-prefixed value. Returns plaintext or original if not encrypted."""
-    if not value.startswith(ENC_PREFIX):
-        return value
-    if fernet is None:
-        raise RuntimeError(
-            f"Config contains encrypted value but keyfile not found at {KEYFILE_PATH}"
+    """
+    Decrypt a Fernet-encrypted config value.
+
+    Accepts both prefixes produced by different install.sh versions:
+        enc:<token>   — lowercase (current)
+        ENC:<token>   — uppercase (legacy)
+
+    Plain-text values (no prefix) are returned unchanged.
+    Decryption errors are logged and return "" so the bot starts and
+    reports the problem clearly rather than crashing.
+    """
+    if value[:4].lower() != "enc:":
+        return value          # plain text — nothing to do
+
+    token = value[4:]         # strip prefix (either case)
+
+    if not _FERNET_AVAILABLE:
+        log.error(
+            "Config contains an encrypted value but the 'cryptography' package "
+            "is not installed.  Run: pip install cryptography"
         )
+        return ""
+
+    if fernet is None:
+        log.error(
+            f"Config contains an encrypted value but key file not found: {_KEY_FILE}  "
+            "Re-run install.sh or store the value as plain text in config.ini."
+        )
+        return ""
+
     try:
-        from cryptography.fernet import Fernet
-        token = value[len(ENC_PREFIX):].encode()
-        return fernet.decrypt(token).decode()
+        return fernet.decrypt(token.encode()).decode()
     except Exception as e:
-        raise RuntimeError(f"Failed to decrypt config value: {e}") from e
+        log.error(f"Failed to decrypt config value: {e}")
+        return ""
 
 
 def load_config(path="/etc/claude-irc-bot/config.ini"):
-    """Load config and transparently decrypt any ENC:-prefixed secret values."""
+    """Load config and transparently decrypt any enc:/ENC:-prefixed secret values."""
     cfg = configparser.ConfigParser()
     cfg.read(path)
 
     fernet = _get_fernet()
 
-    # Decrypt secrets in place
     secret_keys = [
-        ("nickserv",   "password"),
-        ("anthropic",  "api_key"),
+        ("nickserv",  "password"),
+        ("anthropic", "api_key"),
     ]
     for section, key in secret_keys:
         if section in cfg and key in cfg[section]:
@@ -391,8 +385,8 @@ class ClaudeIRCBot:
 
         # ── NickServ ───────────────────────────────────────────────────────
         ns = config["nickserv"] if "nickserv" in config else {}
-        raw_pass         = ns.get("password", config["irc"].get("nickserv_password", ""))
-        self.ns_password = _decrypt_password(raw_pass)   # handles enc: prefix transparently
+        # Password is already decrypted by load_config() — just read it directly.
+        self.ns_password = ns.get("password", config["irc"].get("nickserv_password", ""))
         self.ns_email    = ns.get("email", "")
         self.ns_auto_reg = ns.get("auto_register", "true").lower() == "true"
         self._ns_state   = NS.UNKNOWN
@@ -407,9 +401,9 @@ class ClaudeIRCBot:
             self.cs_managed = [c.strip() for c in managed_raw.split(",") if c.strip()]
         else:
             self.cs_managed = list(self.channels)
-        self.cs_topic    = cs.get("topic", "Anthropic AI - IRC Connector by 2600net")
+        self.cs_topic    = cs.get("topic", "Claude AI Bot on 2600net")
         self.cs_auto_reg = cs.get("auto_register", "true").lower() == "true"
-        self._cs_state: dict[str, str] = {}
+        self._cs_state: dict[str, str] = {}   # keys always stored as _irc_lower()
         access_raw       = cs.get("access_list", "")
         self.cs_access: list[tuple[str, str]] = []
         for entry in access_raw.split(","):
@@ -497,11 +491,11 @@ class ClaudeIRCBot:
         self._chan_topic_setter: dict[str, str | None] = {}
         # Channels where ChanServ INFO has been requested but not yet replied
         self._cs_info_pending: set[str] = set()
-        # Channels where _cs_post_register settings have already been applied
-        # this session — prevents double-applying on reconnect or re-identification
-        self._cs_setup_done: set[str] = set()
-        self._cs_setup_lock = threading.Lock()   # prevents double-run race condition
-        self._ns_profile_done = False             # only set NickServ profile once per session
+        # Pending ACCESS LIST requests: ch_key → (requester_nick, reply_to)
+        # Lines from ChanServ are relayed to reply_to until "End of access list".
+        self._cs_access_list_pending: dict[str, tuple[str, str]] = {}
+        self._ns_profile_done    = False   # only set GREET once per session (re-runs on reconnect are fine)
+        self._ns_hide_email_done = False   # SET HIDE EMAIL is persistent — only sent once per process
 
         # Output queue (token bucket — drives all outgoing PRIVMSGs)
         burst = int(sec.get("output_burst", 5))
@@ -594,9 +588,9 @@ class ClaudeIRCBot:
         self._chan_ops           = set()
         self._chan_topic         = {}
         self._chan_topic_setter  = {}
-        self._cs_info_pending   = set()
-        self._cs_setup_done     = set()
-        self._ns_profile_done   = False
+        self._cs_info_pending        = set()
+        self._cs_access_list_pending = {}
+        self._ns_profile_done   = False   # GREET resets each session; HIDE EMAIL does not
         self._greeted_nicks     = set()
         self._channel_joined_at = {}
         self.nick               = self.desired_nick
@@ -895,8 +889,18 @@ class ClaudeIRCBot:
         log.info(f"[NickServ] {text}")
 
         # ── Identified successfully ────────────────────────────────────────
-        if any(k in tl for k in ("password accepted", "you are now recognized",
-                                  "already identified", "you are already")):
+        # Cast a wide net — Anope versions and configs vary significantly.
+        if any(k in tl for k in (
+            "password accepted",        # Anope 1.8 / 2.0 standard
+            "you are now recognized",   # Anope 1.8
+            "you are now identified",   # Anope 2.0 common variant
+            "identified for",           # "You are now identified for ClaudeBot."
+            "already identified",       # re-identify after reconnect
+            "you are already",          # "You are already identified"
+            "you have identified",      # some custom Anope builds
+            "now identified",           # catch-all substring
+            "password correct",         # some older Anope
+        )):
             log.info("NickServ: identified successfully.")
             with self._ns_lock:
                 self._ns_state = NS.IDENTIFIED
@@ -994,7 +998,12 @@ class ClaudeIRCBot:
         # ── Enforcement notice (nick is registered, must identify) ─────────
         elif any(k in tl for k in ("this nickname is registered", "please identify",
                                     "you must identify")):
-            if self._ns_state != NS.WAIT_ID:
+            if not self.ns_password:
+                log.warning(
+                    "NickServ: enforcement notice received but no password configured — "
+                    "cannot identify. Set [nickserv] password in config.ini."
+                )
+            elif self._ns_state != NS.WAIT_ID:
                 log.info("NickServ: enforcement notice — re-identifying ...")
                 with self._ns_lock:
                     self._ns_state = NS.WAIT_ID
@@ -1029,6 +1038,15 @@ class ClaudeIRCBot:
                 self._ns_state = NS.WAIT_RECOVER
             self._ns(f"RECOVER {self.desired_nick} {self.ns_password}")
 
+        # ── Unrecognised NickServ notice ───────────────────────────────────
+        # Logged at WARNING so it surfaces in the journal without -v.
+        # Helps identify missing match patterns when identification fails.
+        else:
+            if self._ns_state == NS.WAIT_ID:
+                log.warning(
+                    f"NickServ: unhandled notice while waiting for identification: {text!r}"
+                )
+
     def _ns_do_register(self):
         """Called by a timer — attempt NickServ REGISTER."""
         log.info(f"NickServ: attempting REGISTER for {self.desired_nick} ...")
@@ -1044,21 +1062,18 @@ class ClaudeIRCBot:
         log.info(f"[ChanServ] {text}")
 
         # ── INFO reply: channel IS registered ─────────────────────────────
-        # ChanServ INFO returns multiple lines — we only want to trigger
-        # _cs_post_register ONCE. We use _cs_info_pending as a one-shot gate:
-        # the first matching line consumes it; subsequent lines are ignored.
+        # Channel already exists — set state and schedule topic rotation.
+        # Do NOT re-apply the access list (SOP/SUCCESSOR etc.) — that only
+        # runs once, immediately after a fresh REGISTER.
         if any(k in tl for k in ("founder:", "registered on", "last used",
                                   "information on")):
             for ch in list(self.cs_managed):
                 ch_key = _irc_lower(ch)
                 if ch_key in self._cs_info_pending:
                     self._cs_info_pending.discard(ch_key)
-                    if _irc_lower(ch) in tl or True:   # channel confirmed registered
-                        log.info(f"ChanServ: {ch} is already registered — applying settings.")
-                        self._cs_state[ch] = CS.REGISTERED
-                        threading.Thread(
-                            target=self._cs_post_register, args=(ch,), daemon=True
-                        ).start()
+                    log.info(f"ChanServ: {ch} is already registered — skipping access list.")
+                    self._cs_state[ch_key] = CS.REGISTERED
+                    self._schedule_topic_rotation(ch)
             return
 
         # ── INFO reply: channel is NOT registered ──────────────────────────
@@ -1069,7 +1084,7 @@ class ClaudeIRCBot:
                 if ch_key in self._cs_info_pending:
                     self._cs_info_pending.discard(ch_key)
                     log.info(f"ChanServ: {ch} is not registered — registering now ...")
-                    self._cs_state[ch] = CS.WAIT_REG
+                    self._cs_state[ch_key] = CS.WAIT_REG
                     self._cs(f"REGISTER {ch}")
             return
 
@@ -1077,24 +1092,68 @@ class ClaudeIRCBot:
         if any(k in tl for k in ("has been registered", "channel registered",
                                   "registration successful")):
             for ch in list(self.cs_managed):
-                if _irc_lower(ch) in tl or self._cs_state.get(ch) == CS.WAIT_REG:
+                ch_key = _irc_lower(ch)
+                if _irc_lower(ch) in tl or self._cs_state.get(ch_key) == CS.WAIT_REG:
                     log.info(f"ChanServ: {ch} registered successfully.")
-                    self._cs_state[ch] = CS.REGISTERED
+                    self._cs_state[ch_key] = CS.REGISTERED
                     threading.Thread(
                         target=self._cs_post_register, args=(ch,), daemon=True
                     ).start()
             return
 
         # ── Already registered (safety net) ───────────────────────────────
+        # Tried to REGISTER but it already existed — same as INFO confirmed:
+        # set state and schedule topic only, no access list.
         if any(k in tl for k in ("is already registered", "already registered")):
             for ch in list(self.cs_managed):
-                if _irc_lower(ch) in tl or self._cs_state.get(ch) == CS.WAIT_REG:
-                    log.info(f"ChanServ: {ch} already registered — applying settings.")
-                    self._cs_state[ch] = CS.REGISTERED
-                    threading.Thread(
-                        target=self._cs_post_register, args=(ch,), daemon=True
-                    ).start()
+                ch_key = _irc_lower(ch)
+                if _irc_lower(ch) in tl or self._cs_state.get(ch_key) == CS.WAIT_REG:
+                    log.info(f"ChanServ: {ch} already registered — skipping access list.")
+                    self._cs_state[ch_key] = CS.REGISTERED
+                    self._schedule_topic_rotation(ch)
             return
+
+        # ── Password authentication required ──────────────────────────────
+        # ChanServ rejected a command because the bot is not identified.
+        # Re-trigger NickServ identification so the next command succeeds.
+        if any(k in tl for k in ("password authentication required",
+                                  "you must be identified",
+                                  "identify yourself",
+                                  "you need to be identified")):
+            log.warning(
+                "ChanServ: authentication required — bot is not identified. "
+                "Re-triggering NickServ IDENTIFY ..."
+            )
+            if self._ns_state != NS.WAIT_ID and self.ns_password:
+                with self._ns_lock:
+                    self._ns_state = NS.WAIT_ID
+                self._ns(f"IDENTIFY {self.ns_password}")
+            return
+
+        # ── ACCESS LIST relay ──────────────────────────────────────────────
+        # When !bot access list is run, we register the requester in
+        # _cs_access_list_pending.  ChanServ sends the list back as a series
+        # of NOTICE lines — we forward each one to the requester until we
+        # see the "End of access list" terminator.
+        #
+        # Anope ACCESS LIST output looks like:
+        #   "Access list for #channel:"
+        #   "1   nick   AOP   Added by founder on date"
+        #   "End of access list for #channel."
+        if self._cs_access_list_pending:
+            for ch_key, (requester, reply_to) in list(self._cs_access_list_pending.items()):
+                # Forward every line that looks like list content or a header
+                is_end = "end of access list" in tl
+                is_list_line = (
+                    "access list for" in tl
+                    or re.match(r"^\d+\s+", text.strip())  # "1   nick   AOP ..."
+                    or is_end
+                )
+                if is_list_line:
+                    self._send_msg(reply_to, text)
+                    if is_end:
+                        del self._cs_access_list_pending[ch_key]
+                    return
 
     def _on_join(self, msg: dict):
         who     = self._nick_from_prefix(msg["prefix"])
@@ -1341,17 +1400,9 @@ class ClaudeIRCBot:
 
         ch_key = _irc_lower(channel)
 
-        # If settings already applied this session, nothing more to do
-        if ch_key in self._cs_setup_done:
-            log.info(f"ChanServ: {channel} already set up this session — skipping.")
-            return
-
-        # If already known registered, apply settings (guard inside will dedupe)
-        if self._cs_state.get(channel) == CS.REGISTERED:
-            self._cs_post_register(channel)
-            return
-
-        # Ask ChanServ for channel info — reply handled in _handle_chanserv_notice
+        # Always query ChanServ INFO on each connect — the reply handler decides
+        # whether to run the full access-list setup (fresh registration) or just
+        # set state + schedule topic rotation (already registered).
         log.info(f"ChanServ: querying INFO for {channel} ...")
         self._cs_info_pending.add(ch_key)
         self._cs(f"INFO {channel}")
@@ -1371,13 +1422,7 @@ class ClaudeIRCBot:
         QOP does not exist in standard Anope — we never send it.
         """
         ch_key = _irc_lower(channel)
-        with self._cs_setup_lock:
-            if ch_key in self._cs_setup_done:
-                log.info(f"ChanServ: settings already applied for {channel} — skipping.")
-                return
-            self._cs_setup_done.add(ch_key)
-
-        log.info(f"ChanServ: applying settings for {channel} ...")
+        log.info(f"ChanServ: applying access list settings for {channel} ...")
         time.sleep(1)
 
         # Apply access list entries using Anope xOP commands
@@ -1502,6 +1547,61 @@ class ClaudeIRCBot:
             log.error(f"Thread pool submit error: {e}")
 
     # =========================================================================
+    # Channel mode helper — smart routing: ChanServ or direct MODE
+    # =========================================================================
+
+    # Maps (adding, mode_char) → ChanServ command
+    _CS_MODE_CMD: dict[str, str] = {
+        "+o": "OP",    "-o": "DEOP",
+        "+v": "VOICE", "-v": "DEVOICE",
+    }
+
+    def _chan_mode(self, channel: str, modechar: str, nick: str) -> tuple[bool, str]:
+        """
+        Apply a channel mode to nick.
+
+        Routing logic:
+          1. Identified to NickServ AND channel registered with ChanServ
+             → use ChanServ (OP/DEOP/VOICE/DEVOICE)
+          2. Otherwise, if bot has ops in the channel
+             → send direct MODE command
+          3. Neither available
+             → return failure with a descriptive reason
+
+        Returns (success: bool, description: str) for the admin reply.
+        """
+        ch_key        = _irc_lower(channel)
+        cs_registered = self._cs_state.get(ch_key) == CS.REGISTERED
+        identified    = self._ns_state == NS.IDENTIFIED
+        has_ops       = ch_key in self._chan_ops
+
+        if identified and cs_registered and modechar in self._CS_MODE_CMD:
+            cs_cmd = self._CS_MODE_CMD[modechar]
+            self._cs(f"{cs_cmd} {channel} {nick}")
+            log.info(f"_chan_mode: {cs_cmd} {nick} in {channel} via ChanServ.")
+            return True, f"{cs_cmd} {nick} done."
+
+        if has_ops:
+            self._send_raw(f"MODE {channel} {modechar} {nick}")
+            log.info(
+                f"_chan_mode: MODE {modechar} {nick} in {channel} directly "
+                f"(NS:{self._ns_state}, CS registered:{cs_registered})."
+            )
+            return True, f"MODE {modechar} {nick} done."
+
+        # Cannot do either — explain why
+        reasons = []
+        if not identified:
+            reasons.append(f"not identified to NickServ (state: {self._ns_state})")
+        if not cs_registered:
+            reasons.append("channel not registered with ChanServ")
+        if not has_ops:
+            reasons.append("bot has no ops in channel")
+        msg = "Cannot set mode — " + "; ".join(reasons) + "."
+        log.warning(f"_chan_mode: {msg}")
+        return False, msg
+
+    # =========================================================================
     # Admin commands (!bot …)
     # =========================================================================
 
@@ -1522,7 +1622,7 @@ class ClaudeIRCBot:
             return self.cs_managed[0] if self.cs_managed else ""
 
         if cmd == "status":
-            cs_info = ", ".join(f"{ch}={self._cs_state.get(ch,'?')}" for ch in self.cs_managed) or "none"
+            cs_info = ", ".join(f"{ch}={self._cs_state.get(_irc_lower(ch),'?')}" for ch in self.cs_managed) or "none"
             self._send_msg(reply_to,
                 f"Nick: {self.nick} (want: {self.desired_nick}) | "
                 f"NS: {self._ns_state} | "
@@ -1549,14 +1649,16 @@ class ClaudeIRCBot:
         elif cmd in ("op", "deop"):
             if not args:
                 self._send_msg(reply_to, f"Usage: !bot {cmd} <nick> [#chan]"); return
-            self._cs(f"{'OP' if cmd == 'op' else 'DEOP'} {resolve_chan()} {args[0]}")
-            self._send_msg(reply_to, f"{cmd.upper()} {args[0]} sent.")
+            modechar = "+o" if cmd == "op" else "-o"
+            ok, reply = self._chan_mode(resolve_chan(), modechar, args[0])
+            self._send_msg(reply_to, reply)
 
         elif cmd in ("voice", "devoice"):
             if not args:
                 self._send_msg(reply_to, f"Usage: !bot {cmd} <nick> [#chan]"); return
-            self._cs(f"{'VOICE' if cmd == 'voice' else 'DEVOICE'} {resolve_chan()} {args[0]}")
-            self._send_msg(reply_to, f"{cmd.upper()} {args[0]} sent.")
+            modechar = "+v" if cmd == "voice" else "-v"
+            ok, reply = self._chan_mode(resolve_chan(), modechar, args[0])
+            self._send_msg(reply_to, reply)
 
         elif cmd == "kick":
             if not args:
@@ -1626,8 +1728,9 @@ class ClaudeIRCBot:
                 self._cs(f"ACCESS {ch} DEL {args[1]}")
                 self._send_msg(reply_to, f"Removed {args[1]} from {ch} access list.")
             elif sub == "list":
+                ch_key = _irc_lower(ch)
+                self._cs_access_list_pending[ch_key] = (sender, reply_to)
                 self._cs(f"ACCESS {ch} LIST")
-                self._send_msg(reply_to, f"Access list for {ch} requested — check your notices.")
             else:
                 self._send_msg(reply_to, "Usage: !bot access <add|del|list>")
 
@@ -1653,7 +1756,7 @@ class ClaudeIRCBot:
             if not ch:
                 self._send_msg(reply_to, "Usage: !bot register #channel"); return
             self._send_msg(reply_to, f"Registering {ch} with ChanServ ...")
-            self._cs_state[ch] = CS.WAIT_REG
+            self._cs_state[_irc_lower(ch)] = CS.WAIT_REG
             self._cs(f"REGISTER {ch}")
 
         elif cmd == "setup":
@@ -1913,22 +2016,24 @@ class ClaudeIRCBot:
         (e.g. after a GHOST/RECOVER cycle).
         """
         if self._ns_profile_done:
-            log.info("NickServ: profile already set this session — skipping.")
+            log.info("NickServ: GREET already set this session — skipping.")
             return
         self._ns_profile_done = True
 
         time.sleep(2)
         log.info("Setting NickServ profile fields ...")
 
-        # SET GREET — shown in NickServ INFO output
+        # SET GREET — can update every session (rotates, reflects config changes)
         if self.ns_profile_greet:
             greet = self.ns_profile_greet[:200]
             self._ns(f"SET GREET {greet}")
             time.sleep(0.5)
 
-        # SET HIDE EMAIL — hide registration email from INFO
-        if self.ns_profile_hide_email:
+        # SET HIDE EMAIL — persistent NickServ setting, only needs to be sent
+        # once for the lifetime of the registered nick.  Skipped on reconnect.
+        if self.ns_profile_hide_email and not self._ns_hide_email_done:
             self._ns("SET HIDE EMAIL ON")
+            self._ns_hide_email_done = True
             time.sleep(0.5)
 
         # Note: SET URL is intentionally omitted — not all Anope configurations
@@ -1993,7 +2098,7 @@ class ClaudeIRCBot:
             # Always set directly so it works before ChanServ registration
             self._send_raw(f"TOPIC {channel} :{topic}")
             # Also tell ChanServ if we own the channel (makes it persistent)
-            if self._cs_state.get(channel) == CS.REGISTERED:
+            if self._cs_state.get(ch_key) == CS.REGISTERED:
                 self._cs(f"TOPIC {channel} {topic}")
         except Exception as e:
             log.error(f"AI topic generation failed: {e}")
