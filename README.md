@@ -97,11 +97,11 @@ All network-specific settings live in `config.ini`. To run on a different networ
 
 ```ini
 [network]
-name        = EFnet
+name        = 2600net
 description = One of the oldest IRC networks
 
 [irc]
-server      = irc.efnet.org
+server      = irc.2600.net
 port        = 6697
 nick        = ClaudeBot
 channels    = #help, #claude
